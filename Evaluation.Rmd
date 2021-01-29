@@ -1,0 +1,146 @@
+---
+title: "Evaluation"
+author: "Mark Webster"
+date: "04/03/2020"
+output: html_document
+---
+
+I'm not sure how to evalute the model, since so many of the matches only occur once. Let's start by looking at the ones that repeat.
+
+```{r, "load packages", include=FALSE}
+library(codex)
+library(knitr)
+library(data.table)
+library(ggplot2)
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r, "get duplicated matches"}
+dup_cols <- c("player1", "player2", "deck1", "deck2")
+counts <- matches[recorder == "charnel_mouse" & victory != "timeout", .(count = .N), by = dup_cols]
+results <- merge(matches[recorder == "charnel_mouse" & victory != "timeout"],
+                 counts, by = dup_cols)[, .(count = count[1],
+                                            win_ratio = mean(victor == player1)),
+                                        by = dup_cols][deck1 != "" & deck2 != ""]
+kable(results[count > 1L])
+```
+
+Not surprisingly, most of them are from MMM1. Let's compare them to the predicted matchups from the two main versus models.
+
+```{r, "load models"}
+model_results <- setNames(Map(readRDS, paste0("results/tidy_current_vs_split", c("", "_gamma"), ".rds")),
+                          c("lognormal", "Gamma"))
+fn <- function(res, results) {
+  comps1 <- prepare_deck_names_for_modelling(results$deck1, starters, nicknames)
+  comps2 <- prepare_deck_names_for_modelling(results$deck2, starters, nicknames)
+  players1 <- results$player1
+  players2 <- results$player2
+  player <- res$tidy_results$player
+  missing <- setdiff(c(players1, players2), colnames(player))
+  if (length(missing) > 0L) {
+    set.seed(1L)
+    add <- matrix(
+      if (!is.null(res$tidy_results$sd_player))
+        rnorm(nrow(player)*length(missing))*res$tidy_results$sd_player
+      else
+        rnorm(nrow(player)*length(missing))*sqrt(res$tidy_results$var_player),
+      nrow = nrow(player), ncol = length(missing),
+      dimnames = list(iterations = NULL, missing))
+    player <- cbind(player, add)
+  }
+  vapply(seq.int(nrow(results)),
+         function(n) {
+           if (n > nrow(comps1)) stop(n)
+           c1 <- unlist(comps1[n])
+           c2 <- unlist(comps2[n])
+           if (any(is.na(c1))) stop(paste(print(n), print(comps1[n])))
+           if (any(is.na(c2))) stop(paste(print(n), print(comps2[n])))
+           array <- res$vs_array
+           nms <- dimnames(array)[[2]]
+           if (any(!is.element(c1, nms))) stop(paste(setdiff(c1, nms), collapse = ", "))
+           if (any(!is.element(c2, nms))) stop(paste(setdiff(c2, nms), collapse = ", "))
+           parts <- array[, c1, c2]
+           deck_lodds <- apply(parts, 1, sum)
+           player_lodds <- player[, players1[n]] - player[, players2[n]]
+           mean(plogis(deck_lodds + player_lodds))
+         },
+         numeric(1L))
+}
+matchups <- Map(fn, model_results, MoreArgs = list(results = results))
+evals <- cbind(results, as.data.table(matchups))
+kable(evals[count > 1L])
+```
+
+Here are the posterior predictive p-values:
+
+```{r, "p-values"}
+p <- evals[, 
+           .(count, win_ratio,
+             p_lognormal_low = pbinom(pmax(count*win_ratio - 1L, 0L), count, lognormal),
+             p_lognormal_high = pbinom(count*win_ratio, count, lognormal),
+             p_Gamma_low = pbinom(pmax(count*win_ratio - 1L, 0L), count, Gamma),
+             p_Gamma_high = pbinom(count*win_ratio, count, Gamma)), 
+           by = dup_cols
+           ][order(-p_lognormal_high, -p_Gamma_high)]
+p_mid <- p[, .(count, win_ratio,
+               p_lognormal = (p_lognormal_low + p_lognormal_high)/2,
+               p_Gamma = (p_Gamma_low + p_Gamma_high)/2),
+           by = dup_cols
+           ][order(-p_lognormal, -p_Gamma)]
+kable(p_mid[count > 1L])
+```
+
+```{r, "plot p-values"}
+ggplot(melt(p_mid, measure.vars = c("p_lognormal", "p_Gamma"),
+            variable.name = "prior",
+            value.name = "p")[, prior := sub("p_", "", prior)]) +
+  geom_jitter(aes(x = prior, y = p), width = 0.05, height = 0) +
+  scale_y_continuous(limits = 0:1) +
+  facet_wrap(. ~ count)
+```
+
+The p-values are concentrated near 0.5, rather than being uniform. This is what we expect. There aren't any glaring biases I can find here.
+
+Let's take a different approach. We know that Shadow_Night_Black is one of the more specialist players, rarely playing anything other than MonoPurple. Here are his matches:
+
+```{r, "Shadow_Night_Black matches"}
+shadow_evals <- evals[player1 == "Shadow_Night_Black" | player2 == "Shadow_Night_Black"]
+kable(shadow_evals)
+```
+
+```{r, "Shadow_Night_Black tallies"}
+kable(shadow_evals[,
+                   c("MonoPurple?", "lognormal", "Gamma", "Shadow_win_ratio") := list(ifelse(player1 == "Shadow_Night_Black",
+                                                                                             deck1 == "MonoPurple",
+                                                                                             deck2 == "MonoPurple"),
+                                                                                      ifelse(player1 == "Shadow_Night_Black",
+                                                                                             lognormal, 1 - lognormal),
+                                                                                      ifelse(player1 == "Shadow_Night_Black",
+                                                                                             Gamma, 1 - Gamma),
+                                                                                      ifelse(player1 == "Shadow_Night_Black",
+                                                                                             win_ratio, 1 - win_ratio))
+                   ][, .(count = sum(count)), by = "MonoPurple?"])
+```
+
+Huh, more non-Purple matches than I was expecting. Let's split these by whether Shadow is playing as MonoPurple:
+
+```{r, "Shadow_Night_Black wins by whether playing Purple"}
+filtered_Shadow_evals <- shadow_evals[order(-`MonoPurple?`, -win_ratio),
+                                      c("MonoPurple?", "count", "Shadow_win_ratio", "lognormal", "Gamma")]
+ggplot(melt(filtered_Shadow_evals, measure.vars = c("lognormal", "Gamma"), variable.name = "prior", value.name = "forecast")) +
+  geom_point(aes(x = prior, y = forecast, colour = count)) +
+  facet_grid(`MonoPurple?` ~ Shadow_win_ratio, labeller = label_both)
+```
+
+The forecasts are better delineated for the cases where Shadow is playing as MonoPurple. The points with a larger sample size are the only matches where the opponent's deck is monocolour.
+
+As another idea, let's try splitting matches by whether each deck is monocolour or multicolour/draft.. I'd expect the monocolour decks to be slightly underforecasted when facing a non-monocolour deck, since I don't take account of the lack of multicolour penalty.
+
+```{r, "plot matchup by whether mono"}
+ggplot(melt(evals[, c(.SD, .(deck1_is_mono = strtrim(deck1, 4L) == "Mono",
+                             deck2_is_mono = strtrim(deck2, 4L) == "Mono"))],
+            measure.vars = c("lognormal", "Gamma"), variable.name = "prior", value.name = "forecast")) +
+  geom_point(aes(x = forecast, y = win_ratio, colour = prior, size = count, alpha = I(0.5))) +
+  geom_abline(intercept = 0, slope = 1) +
+  facet_grid(deck1_is_mono ~ deck2_is_mono, labeller = label_both)
+```

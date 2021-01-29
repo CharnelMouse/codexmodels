@@ -1,0 +1,82 @@
+---
+title: "Evaluating the models with leave-one-out cross-validation"
+author: "Mark Webster"
+date: "23/08/2020"
+output: html_document
+---
+
+```{r libraries, include=FALSE}
+library(loo)
+library(ggplot2)
+source("scripts/load_data.r")
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+Suppose we now compare all of the models using cross-validation.
+
+```{r calculate-all-model-log-liks}
+model_names <- c("simple_deck",
+                 "split_deck",
+                 "inter_deck",
+                 "full_inter_deck",
+                 "vs_split",
+                 "vs_split_negative",
+                 "vs_split_gamma")
+log_liks <- lapply(model_names,
+                   function(x) readRDS(paste0("results/tidy_", x, ".rds"))$lok_lik) # typo from current package version
+effs <- lapply(log_liks, function(x) relative_eff)
+loos <- Map(function(x, y) loo(x, y), log_liks, effs)
+names(loos) <- model_names
+```
+
+```{r compare-loos}
+compare <- loo_compare(loos)
+compare
+```
+
+`r rownames(compare)[1]` is considered the best model in terms of LOO. However, the standard errors are very large, so this might not mean much.
+
+```{r psis-plots}
+plot(loos$simple_deck, label_points = TRUE)
+plot(loos$full_inter_deck, label_points = TRUE)
+plot(loos$vs_split, label_points = TRUE)
+```
+
+We can compare the effect of each game on the two models of interest:
+
+```{r elpd-pointwise-plots}
+plot(loos$vs_split$pointwise[, 1] - loos$simple_deck$pointwise[, 1],
+     main = "split model vs. simple model",
+     ylab = "ELPD difference")
+```
+
+Here are the individual ELPD differences between the simple model and the current model:
+
+```{r match-log-lik-with-matches}
+elpd_diff <- cbind(normal_matches,
+                   log_lik_diff = loos$vs_split$pointwise[, 1] - loos$simple_deck$pointwise[, 1])
+```
+
+By tournament:
+
+```{r elpd-by-tournament}
+ggplot(elpd_diff[order(tournament, abs(log_lik_diff))],
+       aes(x = seq_along(log_lik_diff),
+           y = log_lik_diff,
+           colour = tournament)) +
+  geom_point()
+```
+
+By first two letters in tournament name, which determines the type of tournmament:
+
+```{r elpd-by-tournament-type}
+ggplot(elpd_diff[, .(log_lik_diff,
+                     type = substr(tournament, 1, 2))
+                 ][order(type, abs(log_lik_diff))],
+       aes(x = seq_along(log_lik_diff),
+           y = log_lik_diff,
+           colour = type)) +
+  geom_point()
+```
+
+How much are we worried about the cross-validation favouring the simple model? Apparently LOO assumes an exchangeable distribution on $(x_k, y_k)$, not just $y_k$, and I'm not sure whether that's the situation we're in or not.

@@ -1,0 +1,79 @@
+---
+title: "Prior choices"
+author: "Mark Webster"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output: html_document
+---
+
+I'll be keeping player skill and deck strength separate for quite some time, so let's consider them separately. Keeping all the log odds normally distributed keeps things simple. Using lognormal distributions for the pool standard distributions worked before, but they're a pain to work with if I need to split a variable into several independent components, such as in deck compositions, or when accounting for turn order in player skills. I could therefore do with a semi-finite distribution that's closed with respect to addition.
+
+Things like half-Cauchy and lognormal distributions don't do this, but the conjugate Gamma prior does with respect to the shape parameter $\alpha$. I think Gelman etc. don't like the Gamma distribution much for variation distributions, but it seems fine for what I want. It's also much easier to determine rough parameters for than the half-Cauchy, since the moments exist and I can use the method of moments or the like rather than using quantiles. Additionally, Gamma variables with $\alpha > 1$ can have a non-zero mode, which I couldn't do with the half-Cauchy prior (I could with lognormal).
+
+Below we do some numerical experiments for the matchup distribution. Here the absolute value for the log-odds samples is used, to make the sampled lopsidedness more clear. Using the signed values makes the boxplot non-useful, since it would give a large inter-quartile range that is sparse away from the boundaries.
+
+```{r, "sample functions"}
+lognormal_matchups <- function(sd) {
+  set.seed(1)
+  var_samples <- as.data.frame(vapply(c(all = 18, decks = 16, players = 2, `component/player` = 1), 
+                                      function(scale) scale*rlnorm(10000, 0, sd)^2, numeric(10000)))
+  std_samples <- rnorm(10000)
+  list(var = var_samples, prob = 1/(1 + exp(-sqrt(var_samples)*abs(std_samples))))
+}
+gamma_matchup <- function(alpha, beta) {
+  set.seed(1)
+  var_samples <- as.data.frame(vapply(c(all = alpha, `players/decks` = alpha/2, player = alpha/4, component = alpha/32), 
+                                      function(x) rgamma(10000, x, beta), numeric(10000)))
+  std_samples <- rnorm(10000)
+  list(var = var_samples, prob = 1/(1 + exp(-sqrt(var_samples)*abs(std_samples))))
+}
+show <- function(samples, log = FALSE) {
+  boxplot(samples$var, log = ifelse(log, "y", ""), ylab = "variance")
+  boxplot(samples$prob, ylim = c(1/2, 1), ylab = "win probability for favoured player")
+  t(simplify2array(lapply(samples$prob, quantile, c(0.005, 0.025, 0.25, 0.75, 0.975, 0.995))))
+}
+```
+
+Here are matchup samples for the Lognormal(0, 1/2)-per-component prior I was using before:
+
+```{r, "sample matchups under lognormal priors"}
+show(lognormal_matchups(1/2))
+```
+
+I give the individual player skills the same standard deviation prior as the pair components, this makes it pretty clear just how much this devalues player skill compared to decks.
+
+As an initial guess for shape and rate parameters, here's the version where the overall matchup has Gamma(1, 1) log-odds variance:
+
+```{r, "sample matchups under Gamma priors"}
+show(gamma_matchup(1, 1))
+```
+
+Does this seem right? The player/deck inter-quartile range looks far too narrow: I doubt half of all draft-legal deck matchups are that balanced. The component prior predictions look too small, too.
+
+Changing the overall $\alpha$ isn't particularly intuitive, since it's a shape parameter. We could try changing the rate (inverse scale) parameter instead, to see what happens. Let's start with $\beta = 1/4$, since it scales the standard deviation by a factor of 2.
+
+```{r, "sample matchups with rate 1/4"}
+show(gamma_matchup(1, 1/4))
+```
+
+How about if we make $\alpha = 2$ as well?
+
+```{r, "sample matchups with gamma(2, 1/4)"}
+show(gamma_matchup(2, 1/4))
+```
+
+I'm still worried about the size of the component interval, but the player/deck spread looks about right, having most of the matchups at least 6-4 sounds right for prior balance possibilities. Let's scale up the parameters, so the component variances have $\alpha = 2$ to pull it away from zero:
+
+```{r, "sample matchups with gamma(64, 8)"}
+show(gamma_matchup(64, 8))
+```
+
+More lopsided than before, but not extremely so. I think the variance spread is now too narrow, though. So I'll try scaling so that the components have $\alpha = 1.5$:
+
+```{r, "sample matchups with gamma(48, 6)"}
+show(gamma_matchup(48, 6))
+```
+
+Compare to the one for the lognormal prior:
+
+```{r, "sample matchups under lognormal priors"}
+```

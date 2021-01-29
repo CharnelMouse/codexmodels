@@ -1,0 +1,39 @@
+# Notes, things to do etc.
+
+## Things to do
+
+Things to do for next update are in italics.
+
+### Core data tasks
+
+- Add a lot more tournament data
+- Think seriously about whether I want to add casual forum match data too
+
+### Core modelling tasks
+
+- Tweak distributions so that models have similar prior distributions for matchups
+- Add more versus models
+  - Optimal-player-skill models had problems, come back to the idea later
+    - deck strength is for optimal play, player skill constrained above by optimal skill level
+    - Possibly have player skill level per deck as a Beta variable, and only effects on win probably are turn order and player skill * deck strength
+    - Player skill and deck strength are correlated between similar decks
+    - This approach more closely matches what the community would want out of deck strengths, which is a matchup table for high-level play similar to those in fighting games
+    - Got a version of this now, but it doesn't work very well. At the same time, all the predicted win probabilities are around 40 or 60 percent, so maybe I just need to complect the model.
+    - Current version also doesn't make much inference on, well, anything, but it's especially noticeable for the specs, where Bashing looks about the same as the rest despite having no match data.
+
+### Presentation tasks
+
+- Collate the results plots to cover all relevant models at once to cut the Rmd size
+
+### Side features
+
+- Do analysis of whether later rounds in the Swiss tournaments tend to have closer matches
+
+## Notes from conversation with Metalize/ak47_training on Discord
+
+Metalize is using 5-digit keys starting at 7 as his Game IDs. (7 because it's his country cell code.)
+Same, but 4-digit, for Event IDs.
+Same Event ID for any casual events within a three-month period.
+
+Match thread link column for PBF games?
+I might need to allow multiple nicknames for a single deck.

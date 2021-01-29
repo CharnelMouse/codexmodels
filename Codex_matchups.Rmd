@@ -1,0 +1,1331 @@
+---
+title: "Codex matchups"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    self_contained: yes
+    code_folding: none
+    df_print: paged
+author: "Mark Webster"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+---
+
+# Preamble
+
+```{r, "setup", include=FALSE}
+library(tidyverse)
+theme_codex <- theme_dark() +
+  theme(panel.border = element_rect(fill = NA, colour = "grey13"),
+        plot.background = element_rect(fill = "grey13", colour = "grey13"),
+        axis.ticks = element_line(colour = "white"),
+        strip.background = element_rect(fill = "grey13", colour = NA),
+        legend.background = element_rect(fill = "grey13", colour = NA),
+        text = element_text(colour = "white"),
+        axis.text = element_text(colour = "white"), 
+  )
+theme_set(theme_codex)
+library(magrittr)
+library(data.table)
+library(codex)
+library(DT)
+library(lpSolve)
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+Things that should affect the matchup:
+
+- Players (skill)
+- Player order
+- Specs
+- Starter deck
+
+```{r, "read model results"}
+model_names <- c("Partial pooling: decks",
+                 "Partial pooling: starters + specs",
+                 "Partial pooling: starters * specs",
+                 "Partial pooling: (starters+specs)^2",
+                 "Versus model, forum data",
+                 "Versus model, forum + Metalize tournament data",
+                 "Versus model, forum + Metalize data",
+                 "Versus model, negative skill, forum data",
+                 "Versus model, Gamma priors, forum data")
+results_file_subnames <- c("simple_deck", "split_deck", "inter_deck", "full_inter_deck",
+                           "vs_split", "vs_split_metal", "vs_split_full_metal", "vs_split_negative",
+                           "vs_split_gamma")
+results_file_names <- paste0("results/tidy_", results_file_subnames, ".rds")
+results <- stats::setNames(Map(readRDS, results_file_names), model_names)
+```
+
+```{r, "check model diagnostics"}
+diagnostics <- mapply("[[", results, MoreOptions = list("diagnostics"))
+diagnostics
+```
+
+`r ifelse(all(diagnostics == 0L), "Diagnostics look good.", "Diagnostics show that there are problems.")`
+
+```{r, "read model samples"}
+sims <- stats::setNames(Map("[[", results, "tidy_results"), model_names)
+attach(stats::setNames(sims, paste0("sim_", results_file_subnames)))
+```
+
+```{r, "load data"}
+source("scripts/load_data.r")
+attach(mean_data)
+metal_players <- sort(unique(c(metal_matches$player1, metal_matches$player2)))
+full_metal_players <- sort(unique(c(full_metal_matches$player1, full_metal_matches$player2)))
+metal_deck_names <- sort(unique(c(metal_matches$deck1, metal_matches$deck2)))
+full_metal_deck_names <- sort(unique(c(full_metal_matches$deck1, full_metal_matches$deck2)))
+n_metal_matches <- nrow(metal_matches)
+n_metal_players <- length(metal_players)
+n_metal_decks <- length(metal_deck_names)
+n_full_metal_matches <- nrow(full_metal_matches)
+n_full_metal_players <- length(full_metal_players)
+n_full_metal_decks <- length(full_metal_deck_names)
+```
+
+```{r, "deck component data"}
+deck_details1 <- components(normal_matches$deck1, codexdata::starters, codexdata::nicknames) %>% 
+  rename(starter1 = .data$starter, spec11 = .data$spec1, spec12 = .data$spec2, spec13 = .data$spec3)
+deck_details2 <- components(normal_matches$deck2, codexdata::starters, codexdata::nicknames) %>% 
+  rename(starter2 = .data$starter, spec21 = .data$spec1, spec22 = .data$spec2, spec23 = .data$spec3)
+matches_with_starters_and_specs <- cbind(normal_matches, deck_details1, deck_details2)
+
+starter_specs <- outer(starters, specs, paste, sep = "/")
+spec_specs <- unlist(lapply(seq.int(Sp - 1),
+                            function(n) paste0(specs[n], "/", specs[setdiff(seq.int(Sp), seq.int(n))])))
+```
+
+# Prior choice
+
+See [Prior choice](priors.html).
+
+# Posterior predictive checks
+
+It's hard, for me, to get an idea of how accurate the model is from these results, so let's look at its predictions for some matches. Looking at the model's post-hoc predictions for the matches used to fit it is a cheat, since we're using the data twice, but it should give a rough idea of how good it is.
+
+First, we'll just list the predicted probability for the observed outcome of each match.
+
+```{r, "Matchup predictions for mean performance models"}
+won_effect <- 2*rep(w, each = nrow(sims[[1]]$matchup)) - 1
+won <- w == 1
+match_names <- codex:::match_names(normal_matches)
+matchups_models <- rbindlist(Map(
+  function(x) {
+    res <- colMeans(1/(1 + exp(-won_effect*x$matchup[, ..match_names, drop = FALSE])))
+    data.table(`match name` = match_names,
+               `result probability` = res,
+               fairness = 1 - 2*abs(res - 1/2))
+  },
+  sims), 
+  idcol = "model")[, .(model = factor(model, model_names), `match name`, `result probability`, fairness)]
+formatRound(datatable(matchups_models, rownames = FALSE, filter = "top"), 3:4, 2)
+```
+
+There aren't many upsets here:
+
+```{r, "Upset counts for mean performance models"}
+matchups_models[, .(upsets = sum(`result probability` < 0.5),
+                    `upset proportion` = mean(`result probability` < 0.5)),
+                by = "model"]
+```
+
+This can be seen more easily in the below density plot.
+
+```{r, "Density plots for predictions for matches with simple decks"}
+ggplot(matchups_models, aes(.data$`result probability`, colour = .data$model)) +
+  geom_density() +
+  xlab("result probability") +
+  ggtitle("Post-hoc probability for given match results") +
+  scale_colour_viridis_d(name = "model")
+ggplot(matchups_models, aes(.data$`result probability`, colour = .data$model)) +
+  geom_density() +
+  xlab("result probability") +
+  ggtitle("Post-hoc probability for given match results, by victor turn") +
+  scale_colour_viridis_d(name = "model") +
+  facet_wrap(. ~ factor(ifelse(won, "P1 win", "P2 win")))
+```
+
+The post-hoc predictions are heavily lopsided towards unbalanced matchups. Well, these are post-hoc predictions, so we'd expect the predictions to lean towards being correct, to be some extent. What might be more helpful is to compare how often player 1 wins matches, compared to how often the model thinks they should.
+
+```{r, "Predictions for matches, split by predicted win probability with simple decks"}
+matchups_models[, .(model, `match name`, `result probability`, fairness,
+                    P1_win_prob = ifelse(rep(won, length(model_names)), 
+                                         `result probability`, 
+                                         1 - `result probability`),
+                    rounded = round(ifelse(rep(won, length(model_names)), 
+                                           `result probability`, 
+                                           1 - `result probability`),
+                                    1),
+                    win = rep(won, length(model_names)))
+                ][, .(rate = ifelse(.N == 0, NA, mean(win)),
+                      prob = ifelse(.N == 0, NA, mean(P1_win_prob))),
+                  by = c("rounded", "model")] %>% 
+  ggplot(aes(.data$prob, .data$rate, colour = .data$model)) + 
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1) + 
+  xlab("mean forecast p1 win probability") + 
+  ylab("observed p1 win rate") + 
+  ggtitle("P1 win rate compared to predicted win probability grouped to nearest 10%") +
+  scale_colour_viridis_d(name = "model")
+```
+
+It looks like the post-hoc predictions currently aren't lopsided enough! The actual outcomes are even more extreme than predicted.
+
+We also give the average score for each model, for two types of proper scoring rule:
+
+```{r, "model scores"}
+model_log_scores <- matchups_models[, .(model, 
+                                        `log score` = -log(`result probability`), 
+                                        `Brier score` = (1 - `result probability`)^2)
+                                    ][, .(`log score` = mean(`log score`), `Brier score` = mean(`Brier score`)),
+                                      by = "model"]
+model_log_scores
+```
+
+For reference, putting 50-50 odds on player 1 winning would give a logarithmic score of `r log(2)` and a Brier score of 0.25, regardless of true win rate. The scores have different signs, but in both cases better models have a score closer to zero. So we're definitely doing better at predicting match results than just flipping a coin, and I don't just have to hang up my statistician hat in shame. You can also see how much improvement we got just from switching to a "versus model", where deck components are only evaluated relative to the opposing deck components.
+
+# Results for mean models
+
+```{r, "extract simple deck result elements"}
+decks_simple_deck <- sim_simple_deck$deck
+deck_turns_simple_deck <- sim_simple_deck$deck_turn
+```
+
+```{r, "extract split deck model results"}
+starters_split_deck <- sim_split_deck$starter
+starter_turns_split_deck <- sim_split_deck$starter_turn
+
+specs_split_deck <- sim_split_deck$spec
+spec_turns_split_deck <- sim_split_deck$spec_turn
+```
+
+```{r, "extract inter-deck interactions model results"}
+starters_inter_deck <- sim_inter_deck$starter
+starter_turns_inter_deck <- sim_inter_deck$starter_turn
+
+specs_inter_deck <- sim_inter_deck$spec
+spec_turns_inter_deck <- sim_inter_deck$spec_turn
+
+starter_specs_inter_deck <- lapply(1:dim(sim_inter_deck$starter_spec)[1], 
+                                   function(n) {
+                                     as.vector(sim_inter_deck$starter_spec[n, , ]) %>% 
+                                       set_names(outer(starters, specs, str_c, sep = "/"))
+                                   })
+starter_specs_inter_deck <- do.call(rbind, starter_specs_inter_deck)
+```
+
+```{r, "filter out the optimal-play models"}
+mean_sims <- sims[!str_detect(names(sims), "[Oo]ptimal") & !str_detect(names(sims), "Versus")]
+mean_names <- names(mean_sims)
+simple_mean_model_names <- str_remove(mean_names, "Partial pooling: ")
+split_mean_sims <- mean_sims[str_detect(names(mean_sims), "starters")]
+split_mean_names <- names(split_mean_sims)
+simple_split_mean_model_names <- str_remove(split_mean_names, "Partial pooling: ")
+```
+
+## Turn advantage
+
+```{r, "combine turn results for mean performance decks"}
+turns_mean_models <-  vapply(mean_sims, function(x) x$turn, mean_sims[[1]]$turn) %>% 
+  set_colnames(simple_mean_model_names) %>% 
+  as_tibble() %>%  
+  gather("model", "first-player win log-odds", everything(), factor_key = TRUE)
+```
+
+```{r, "plot turn results for mean performance decks"}
+ggplot(turns_mean_models, aes(x = .data$`first-player win log-odds`, colour = .data$model)) +
+  geom_density() +
+  ggtitle("First-player win log-odds") +
+  xlab("base first-player win log-odds") +
+  scale_colour_viridis_d(name = "model")
+```
+
+```{r, "give first-player advantage for mean performance decks"}
+group_by(turns_mean_models, .data$model) %>% 
+  summarise(`probability first-player advantaged` = mean(.data$`first-player win log-odds` > 0))
+```
+
+## Player skill
+
+```{r, "extract mean model player skill"}
+players_mean_decks <- lapply(mean_sims, function(x) as_tibble(set_colnames(x$player, players))) %>% 
+  map(mutate, sample = seq.int(n())) %>% 
+  map2(simple_mean_model_names, function(x, y) mutate(x, model = factor(y, simple_mean_model_names))) %>% 
+  reduce(rbind) %>% 
+  gather("player", "player skill", players, factor_key = TRUE)
+players_levels <- filter(players_mean_decks, model == last(simple_mean_model_names)) %>% 
+  group_by(.data$player) %>% 
+  summarise(skill = mean(.data$`player skill`)) %>% 
+  arrange(.data$skill) %>% 
+  pull(.data$player)
+players_mean_decks <- mutate(players_mean_decks, player = factor(.data$player, players_levels)) %>% 
+  group_by(.data$model, .data$player) %>% 
+  mutate(mean = mean(.data$`player skill`)) %>% 
+  ungroup()
+P1_players_mean_decks <- lapply(mean_sims, function(x) as_tibble(set_colnames(x$player + x$player_turn,
+                                                                              players))) %>% 
+  map(mutate, sample = seq.int(n())) %>% 
+  map2(simple_mean_model_names, function(x, y) mutate(x, model = factor(y, simple_mean_model_names))) %>% 
+  reduce(rbind) %>% 
+  gather("player", "player skill", players, factor_key = TRUE) %>% 
+  mutate(player = factor(.data$player, players_levels)) %>% 
+  group_by(.data$model, .data$player) %>% 
+  mutate(mean = mean(.data$`player skill`)) %>% 
+  ungroup()
+P2_players_mean_decks <- lapply(mean_sims, function(x) as_tibble(set_colnames(x$player - x$player_turn,
+                                                                              players))) %>% 
+  map(mutate, sample = seq.int(n())) %>% 
+  map2(simple_mean_model_names, function(x, y) mutate(x, model = factor(y, simple_mean_model_names))) %>% 
+  reduce(rbind) %>% 
+  gather("player", "player skill", players, factor_key = TRUE) %>% 
+  mutate(player = factor(.data$player, players_levels)) %>% 
+  group_by(.data$model, .data$player) %>% 
+  mutate(mean = mean(.data$`player skill`)) %>% 
+  ungroup()
+```
+
+```{r, "extract mean model player ranks"}
+player_ranks_mean_decks <- extract_skill_ranks(players_mean_decks)
+P1_player_ranks_mean_decks <- extract_skill_ranks(P1_players_mean_decks)
+P2_player_ranks_mean_decks <- extract_skill_ranks(P2_players_mean_decks)
+```
+
+```{r, "extract mean model turn skill effect"}
+player_turns_mean_decks <- lapply(mean_sims, function(x) as_tibble(set_colnames(x$player_turn, players))) %>% 
+  map(mutate, sample = seq.int(n())) %>% 
+  map2(simple_mean_model_names, function(x, y) mutate(x, model = factor(y, simple_mean_model_names))) %>% 
+  map(gather, "player", "player skill turn effect", players, factor_key = TRUE)
+player_turns_levels <- select(player_turns_mean_decks[[length(player_turns_mean_decks)]], -.data$model) %>% 
+  group_by(.data$player) %>% 
+  summarise(`turn skill effect` = mean(.data$`player skill turn effect`)) %>% 
+  arrange(abs(.data$`turn skill effect`)) %>% 
+  pull(.data$player)
+player_turns_mean_decks <- map(player_turns_mean_decks, mutate, player = factor(.data$player, player_turns_levels)) %>% 
+  reduce(rbind)
+```
+
+```{r "extract mean model mean player skills"}
+turn_names <- c("first", "overall", "second")
+all_players_mean_decks <- Reduce(rbind,
+                                 list(mutate(players_mean_decks, turn = factor("overall", turn_names)),
+                                      mutate(P1_players_mean_decks, turn = factor("first", turn_names)),
+                                      mutate(P2_players_mean_decks, turn = factor("second", turn_names)))) %>%
+  group_by(model, turn, player) %>% 
+  summarise(`player skill` = mean(`player skill`)) %>% 
+  ungroup()
+```
+
+```{r plot-mean-model-player-skill}
+plot_player_skill(players_mean_decks, "overall") + facet_grid(. ~ .data$model, labeller = label_wrap_gen())
+plot_player_skill(P1_players_mean_decks, "first") + facet_grid(. ~ .data$model, labeller = label_wrap_gen())
+plot_player_skill(P2_players_mean_decks, "second") + facet_grid(. ~ .data$model, labeller = label_wrap_gen())
+```
+
+```{r plot-mean-model-player-ranks}
+player_ranks_mean_decks %>% 
+  ggplot(aes(.data$rank, .data$freq, colour = .data$model)) +
+  geom_line() +
+  facet_wrap(. ~ .data$player) +
+  xlab("rank") +
+  ylab("frequency") +
+  ggtitle("Player ranks") +
+  scale_colour_viridis_d(name = "model") +
+  theme(legend.position = "bottom")
+P1_player_ranks_mean_decks %>% 
+  ggplot(aes(.data$rank, .data$freq, colour = .data$model)) +
+  geom_line() +
+  facet_wrap(. ~ .data$player) +
+  xlab("rank") +
+  ylab("frequency") +
+  ggtitle("Player ranks as first player") +
+  scale_colour_viridis_d(name = "model") +
+  theme(legend.position = "bottom")
+P2_player_ranks_mean_decks %>% 
+  ggplot(aes(.data$rank, .data$freq, colour = .data$model)) +
+  geom_line() +
+  facet_wrap(. ~ .data$player) +
+  xlab("rank") +
+  ylab("frequency") +
+  ggtitle("Player ranks as second player") +
+  scale_colour_viridis_d(name = "model") +
+  theme(legend.position = "bottom")
+```
+
+```{r plot-mean-model-turn-skill-effect}
+player_turns_mean_decks %>% 
+  ggplot(aes(player, `player skill turn effect`, fill = model)) +
+  geom_violin(position = "identity", colour = NA) +
+  coord_flip() +
+  ggtitle("Turn effect on player skill (P1 - P2)", "Mean-effect models") +
+  xlab("player") +
+  ylab("skill turn effect") +
+  scale_fill_viridis_d(name = "model") +
+  theme(legend.position = "bottom")
+```
+
+```{r plot-mean-model-mean-player-skills}
+all_players_mean_decks %>% 
+  ggplot(aes(player, `player skill`, colour = model)) +
+  geom_point() +
+  coord_flip() +
+  ylab("player skill") +
+  ggtitle("Player mean skill levels by turn order", "Mean-effect models") +
+  scale_colour_viridis_d() +
+  theme(legend.position = "bottom") +
+  facet_wrap(. ~ turn)
+```
+
+## Deck strength
+
+```{r extract-mean-model-monodeck-strengths}
+mononames <- paste0("Mono", setdiff(starters, "Neutral"))
+monobits <- components(mononames, codexdata::starters, nicknames)
+monodecks_split_mean_decks <- lapply(split_mean_sims,
+                                     function(x) {
+                                       y <- x$starter[, match(monobits$starter, starters)] +
+                                         x$spec[, match(monobits$spec1, specs)] +
+                                         x$spec[, match(monobits$spec2, specs)] +
+                                         x$spec[, match(monobits$spec3, specs)]
+                                       if (!is.null(x$starter_spec)) {
+                                         y <- y + 
+                                           apply(monobits, 1,
+                                                 function(y) x$starter_spec[,
+                                                                            match(y["starter"], starters),
+                                                                            match(y["spec1"], specs)]) +
+                                           apply(monobits, 1,
+                                                 function(y) x$starter_spec[,
+                                                                            match(y["starter"], starters),
+                                                                            match(y["spec2"], specs)]) +
+                                           apply(monobits, 1,
+                                                 function(y) x$starter_spec[,
+                                                                            match(y["starter"], starters),
+                                                                            match(y["spec3"], specs)])
+                                       }
+                                       if (!is.null(x$spec_spec)) {
+                                         y <- y +
+                                           apply(monobits, 1,
+                                                 function(y) {
+                                                   spec_names <- y[paste0("spec", 1:3)]
+                                                   indices <- match(paste0(spec_names[c(1, 1, 2)],
+                                                                           "/",
+                                                                           spec_names[c(2, 3, 3)]),
+                                                                    spec_specs)
+                                                   rowSums(x$spec_spec[, indices])
+                                                 })
+                                       }
+                                       set_colnames(y, mononames) %>% 
+                                         as_tibble()
+                                     }) %>% 
+  map2(simple_split_mean_model_names, 
+       function(x, y) mutate(x, model = factor(y, simple_split_mean_model_names))) %>% 
+  reduce(rbind) %>% 
+  gather("deck", "deck strength", mononames, factor_key = TRUE)
+monodecks_levels <- filter(monodecks_split_mean_decks, model == last(simple_split_mean_model_names)) %>% 
+  group_by(.data$deck) %>% 
+  summarise(strength = mean(.data$`deck strength`)) %>% 
+  arrange(.data$strength) %>% 
+  pull(.data$deck)
+monodecks_split_mean_decks <- mutate(monodecks_split_mean_decks,
+                                     deck = factor(deck, monodecks_levels))
+P1_monodecks_split_mean_decks <- lapply(split_mean_sims,
+                                        function(x) {
+                                          y <- x$starter[, match(monobits$starter, starters)] +
+                                            x$starter_turn[, match(monobits$starter, starters)] +
+                                            x$spec[, match(monobits$spec1, specs)] +
+                                            x$spec[, match(monobits$spec2, specs)] +
+                                            x$spec[, match(monobits$spec3, specs)] +
+                                            x$spec_turn[, match(monobits$spec1, specs)] +
+                                            x$spec_turn[, match(monobits$spec2, specs)] +
+                                            x$spec_turn[, match(monobits$spec3, specs)]
+                                          if (!is.null(x$starter_spec)) {
+                                            y <- y + 
+                                              apply(monobits, 1,
+                                                    function(y) x$starter_spec[,
+                                                                               match(y["starter"], starters),
+                                                                               match(y["spec1"], specs)]) +
+                                              apply(monobits, 1,
+                                                    function(y) x$starter_spec[,
+                                                                               match(y["starter"], starters),
+                                                                               match(y["spec2"], specs)]) +
+                                              apply(monobits, 1,
+                                                    function(y) x$starter_spec[,
+                                                                               match(y["starter"], starters),
+                                                                               match(y["spec3"], specs)])
+                                          }
+                                          if (!is.null(x$spec_spec)) {
+                                            y <- y +
+                                              apply(monobits, 1,
+                                                    function(y) {
+                                                      spec_names <- y[paste0("spec", 1:3)]
+                                                      indices <- match(paste0(spec_names[c(1, 1, 2)],
+                                                                              "/",
+                                                                              spec_names[c(2, 3, 3)]),
+                                                                       spec_specs)
+                                                      rowSums(x$spec_spec[, indices])
+                                                    })
+                                          }
+                                          set_colnames(y, mononames) %>% 
+                                            as_tibble()
+                                        }) %>% 
+  map2(simple_split_mean_model_names, 
+       function(x, y) mutate(x, model = factor(y, simple_split_mean_model_names))) %>% 
+  reduce(rbind) %>% 
+  gather("deck", "deck strength", mononames, factor_key = TRUE) %>% 
+  mutate(deck = factor(deck, monodecks_levels))
+P2_monodecks_split_mean_decks <- lapply(split_mean_sims,
+                                        function(x) {
+                                          y <- x$starter[, match(monobits$starter, starters)] -
+                                            x$starter_turn[, match(monobits$starter, starters)] +
+                                            x$spec[, match(monobits$spec1, specs)] +
+                                            x$spec[, match(monobits$spec2, specs)] +
+                                            x$spec[, match(monobits$spec3, specs)] -
+                                            x$spec_turn[, match(monobits$spec1, specs)] -
+                                            x$spec_turn[, match(monobits$spec2, specs)] -
+                                            x$spec_turn[, match(monobits$spec3, specs)]
+                                          if (!is.null(x$starter_spec)) {
+                                            y <- y + 
+                                              apply(monobits, 1,
+                                                    function(y) x$starter_spec[,
+                                                                               match(y["starter"], starters),
+                                                                               match(y["spec1"], specs)]) +
+                                              apply(monobits, 1,
+                                                    function(y) x$starter_spec[,
+                                                                               match(y["starter"], starters),
+                                                                               match(y["spec2"], specs)]) +
+                                              apply(monobits, 1,
+                                                    function(y) x$starter_spec[,
+                                                                               match(y["starter"], starters),
+                                                                               match(y["spec3"], specs)])
+                                          }
+                                          if (!is.null(x$spec_spec)) {
+                                            y <- y +
+                                              apply(monobits, 1,
+                                                    function(y) {
+                                                      spec_names <- y[paste0("spec", 1:3)]
+                                                      indices <- match(paste0(spec_names[c(1, 1, 2)],
+                                                                              "/",
+                                                                              spec_names[c(2, 3, 3)]),
+                                                                       spec_specs)
+                                                      rowSums(x$spec_spec[, indices])
+                                                    })
+                                          }
+                                          set_colnames(y, mononames) %>% 
+                                            as_tibble()
+                                        }) %>% 
+  map2(simple_split_mean_model_names, 
+       function(x, y) mutate(x, model = factor(y, simple_split_mean_model_names))) %>% 
+  reduce(rbind) %>% 
+  gather("deck", "deck strength", mononames, factor_key = TRUE) %>% 
+  mutate(deck = factor(deck, monodecks_levels))
+```
+
+```{r, "plot mean model monodeck strengths"}
+ggplot(monodecks_split_mean_decks, aes(.data$deck, .data$`deck strength`, fill = .data$model)) +
+  geom_violin(position = "identity", colour = NA) +
+  coord_flip() +
+  xlab("deck") +
+  ylab("strength") +
+  scale_fill_viridis_d(name = "model") +
+  theme(legend.position = "bottom") +
+  ggtitle("Deck strength", "Split-deck mean effects models")
+ggplot(P1_monodecks_split_mean_decks, aes(.data$deck, .data$`deck strength`, fill = .data$model)) +
+  geom_violin(position = "identity", colour = NA) +
+  coord_flip() +
+  xlab("deck") +
+  ylab("strength") +
+  scale_fill_viridis_d(name = "model") +
+  theme(legend.position = "bottom") +
+  ggtitle("Deck strength as first player", "Split-deck mean effects models")
+ggplot(P2_monodecks_split_mean_decks, aes(.data$deck, .data$`deck strength`, fill = .data$model)) +
+  geom_violin(position = "identity", colour = NA) +
+  coord_flip() +
+  xlab("deck") +
+  ylab("strength") +
+  scale_fill_viridis_d(name = "model") +
+  theme(legend.position = "bottom") +
+  ggtitle("Deck strength as second player", "Split-deck mean effects models")
+
+ggplot(mutate(monodecks_split_mean_decks, `deck strength` = 1/(1+exp(-.data$`deck strength`))),
+       aes(.data$deck, .data$`deck strength`, fill = .data$model)) +
+  geom_violin(position = "identity", colour = NA) +
+  coord_flip() +
+  xlab("deck") +
+  ylab("strength") +
+  scale_fill_viridis_d(name = "model") +
+  theme(legend.position = "bottom") +
+  ggtitle("Deck strength", "Split-deck mean effects models")
+ggplot(mutate(P1_monodecks_split_mean_decks, `deck strength` = 1/(1+exp(-.data$`deck strength`))),
+       aes(.data$deck, .data$`deck strength`, fill = .data$model)) +
+  geom_violin(position = "identity", colour = NA) +
+  coord_flip() +
+  xlab("deck") +
+  ylab("strength") +
+  scale_fill_viridis_d(name = "model") +
+  theme(legend.position = "bottom") +
+  ggtitle("Deck strength as first player", "Split-deck mean effects models")
+ggplot(mutate(P2_monodecks_split_mean_decks, `deck strength` = 1/(1+exp(-.data$`deck strength`))),
+       aes(.data$deck, .data$`deck strength`, fill = .data$model)) +
+  geom_violin(position = "identity", colour = NA) +
+  coord_flip() +
+  xlab("deck") +
+  ylab("strength") +
+  scale_fill_viridis_d(name = "model") +
+  theme(legend.position = "bottom") +
+  ggtitle("Deck strength as second player", "Split-deck mean effects models")
+```
+
+## Deck-only model
+
+And now for deck info (The DeGrey-ding deck is [Present]/Strength/Anarchy):
+
+```{r, "extract deck-only strengths", fig.height=10}
+simple_deck_strength_levels <- levels(get_by_mean_value(decks_simple_deck)$effect)
+simple_deck_strengths <- Reduce(function(x, y) merge(x, y, on = c("iteration", "effect")),
+                                list(melt(as.data.table(decks_simple_deck)[, c(.(iteration = 1:.N), .SD)], 
+                                          id.vars = "iteration",
+                                          variable.name = "effect", value.name = "overall"),
+                                     melt(as.data.table(decks_simple_deck + deck_turns_simple_deck)[, c(.(iteration = 1:.N), .SD)], 
+                                          id.vars = "iteration",
+                                          variable.name = "effect", value.name = "P1"),
+                                     melt(as.data.table(decks_simple_deck - deck_turns_simple_deck)[, c(.(iteration = 1:.N), .SD)], 
+                                          id.vars = "iteration",
+                                          variable.name = "effect", value.name = "P2")))
+simple_deck_strengths$effect <- factor(simple_deck_strengths$effect, simple_deck_strength_levels)
+plot_flipped_effects_violin(melt(simple_deck_strengths, id.vars = c("iteration", "effect"),
+                                 variable.name = "turn", value.name = "effect size"), 
+                            "Ordered by mean overall strength", "Partial pooling on independent decks") +
+  xlab("deck") +
+  ylab("strength") +
+  ylim(c(-3, 3)) +
+  facet_grid(. ~ turn)
+
+get_by_mean_value(deck_turns_simple_deck, sort_fn = function(x) sort(abs(x))) %>% 
+  plot_flipped_effects_violin("Ordered by absolute mean turn effect on strength", "Partial pooling on independent decks") + 
+  xlab("deck") + 
+  ylab("turn-order strength effect")
+```
+
+```{r, "plot deck-only strengths", fig.height=15}
+means_simple_deck <- colMeans(decks_simple_deck) %>% 
+  enframe(name = NULL) %>% 
+  rename(overall = .data$value) %>% 
+  mutate(deck = factor(deck_names, levels = deck_names[order(.data$overall)]),
+         first = .data$overall + as.numeric(colMeans(deck_turns_simple_deck)),
+         second = .data$overall - as.numeric(colMeans(deck_turns_simple_deck))) %>% 
+  gather("turn", "strength", .data$overall, .data$first, .data$second, factor_key = TRUE) %>% 
+  mutate(turn = factor(.data$turn, levels = c("first", "overall", "second")))
+
+ggplot(means_simple_deck, aes(deck, strength, pch = turn, colour = turn)) + 
+  geom_point() + 
+  coord_flip() + 
+  ggtitle("deck mean strength levels by turn order", "Partial pooling on independent decks") +
+  scale_colour_viridis_d()
+
+plot_probability_largest(get_probability_largest(decks_simple_deck)) +
+  xlab("deck") +
+  ylab("probability strongest")
+```
+
+## Deck by spec and starter
+
+And now for deck info:
+
+```{r, "extract split starter strengths"}
+get_by_mean_value(starters_split_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength", "Partial pooling on starters and specs") + 
+  xlab("starter") + 
+  ylab("strength")
+plot_rank(starters_split_deck, "starter strength", "Partial pooling on starters and specs")
+
+get_by_mean_value(starters_split_deck + starter_turns_split_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength as first starter",
+                              "Partial pooling on starters and specs") + 
+  xlab("starter") + 
+  ylab("strength")
+plot_rank(starters_split_deck + starter_turns_split_deck, "first starter strength",
+          "Partial pooling on starters and specs")
+
+get_by_mean_value(starters_split_deck - starter_turns_split_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean skill as second starter", "Partial pooling on starters and specs") + 
+  xlab("starter") + 
+  ylab("skill")
+plot_rank(starters_split_deck - starter_turns_split_deck, "second starter strength",
+          "Partial pooling on starters and specs")
+
+get_by_mean_value(starter_turns_split_deck, sort_fn = function(x) sort(abs(x))) %>% 
+  plot_flipped_effects_violin("Ordered by absolute mean turn effect on strength",
+                              "Partial pooling on starters and specs") + 
+  xlab("starter") + 
+  ylab("turn-order strength effect")
+```
+
+```{r, "plot split starter strengths"}
+means_split_starter <- colMeans(starters_split_deck) %>% 
+  enframe(name = NULL) %>% 
+  rename(overall = .data$value) %>% 
+  mutate(starter = factor(starters, levels = starters[order(.data$overall)]),
+         first = .data$overall + as.numeric(colMeans(starter_turns_split_deck)),
+         second = .data$overall - as.numeric(colMeans(starter_turns_split_deck))) %>% 
+  gather("turn", "strength", .data$overall, .data$first, .data$second, factor_key = TRUE) %>% 
+  mutate(turn = factor(.data$turn, levels = c("first", "overall", "second")))
+
+ggplot(means_split_starter, aes(starter, strength, pch = turn, colour = turn)) + 
+  geom_point() + 
+  coord_flip() + 
+  ggtitle("starter mean strength levels by turn order", "Partial pooling on starters and specs")
+```
+
+```{r, "extract split spec strengths"}
+get_by_mean_value(specs_split_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength", "Partial pooling on starters and specs") + 
+  xlab("spec") + 
+  ylab("strength")
+plot_rank(specs_split_deck, "spec strength", "Partial pooling on starters and specs")
+
+get_by_mean_value(specs_split_deck + spec_turns_split_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength as first spec",
+                              "Partial pooling on starters and specs") + 
+  xlab("spec") + 
+  ylab("strength")
+plot_rank(specs_split_deck + spec_turns_split_deck, "first spec strength",
+          "Partial pooling on starters and specs")
+
+get_by_mean_value(specs_split_deck - spec_turns_split_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean skill as second spec",
+                              "Partial pooling on starters and specs") + 
+  xlab("spec") + 
+  ylab("skill")
+plot_rank(specs_split_deck - spec_turns_split_deck, "second spec strength",
+          "Partial pooling on starters and specs")
+
+get_by_mean_value(spec_turns_split_deck, sort_fn = function(x) sort(abs(x))) %>% 
+  plot_flipped_effects_violin("Ordered by absolute mean turn effect on strength", "Partial pooling on starters and specs") + 
+  xlab("spec") + 
+  ylab("turn-order strength effect")
+```
+
+```{r, "plot split spec strengths"}
+means_split_spec <- colMeans(specs_split_deck) %>% 
+  enframe(name = NULL) %>% 
+  rename(overall = .data$value) %>% 
+  mutate(spec = factor(specs, levels = specs[order(.data$overall)]),
+         first = .data$overall + as.numeric(colMeans(spec_turns_split_deck)),
+         second = .data$overall - as.numeric(colMeans(spec_turns_split_deck))) %>% 
+  gather("turn", "strength", .data$overall, .data$first, .data$second, factor_key = TRUE) %>% 
+  mutate(turn = factor(.data$turn, levels = c("first", "overall", "second")))
+
+ggplot(means_split_spec, aes(spec, .data$strength, pch = .data$turn, colour = .data$turn)) + 
+  geom_point() + 
+  coord_flip() + 
+  ggtitle("spec mean strength levels by turn order", "Partial pooling on starters and specs")
+```
+
+## Inter-deck interactions
+
+And now for deck info:
+
+```{r, "extract inter starter strengths"}
+get_by_mean_value(starters_inter_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength", "Partial pooling and interactions on starters and specs") + 
+  xlab("starter") + 
+  ylab("strength")
+plot_rank(starters_inter_deck, "starter strength",
+          "Partial pooling and interactions on starters and specs")
+
+get_by_mean_value(starters_inter_deck + starter_turns_inter_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength as first starter", "Partial pooling and interactions on starters and specs") + 
+  xlab("starter") + 
+  ylab("strength")
+plot_rank(starters_inter_deck + starter_turns_inter_deck, "first starter strength",
+          "Partial pooling and interactions on starters and specs")
+
+get_by_mean_value(starters_inter_deck - starter_turns_inter_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean skill as second starter", "Partial pooling and interactions on starters and specs") + 
+  xlab("starter") + 
+  ylab("skill")
+plot_rank(starters_inter_deck - starter_turns_inter_deck, "second starter strength",
+          "Partial pooling and interactions on starters and specs")
+
+get_by_mean_value(starter_turns_inter_deck, sort_fn = function(x) sort(abs(x))) %>% 
+  plot_flipped_effects_violin("Ordered by absolute mean turn effect on strength", "Partial pooling and interactions on starters and specs") + 
+  xlab("starter") + 
+  ylab("turn-order strength effect")
+```
+
+```{r, "plot inter starter strengths"}
+means_split_starter <- colMeans(starters_inter_deck) %>% 
+  enframe(name = NULL) %>% 
+  rename(overall = .data$value) %>% 
+  mutate(starter = factor(starters, levels = starters[order(.data$overall)]),
+         first = .data$overall + as.numeric(colMeans(starter_turns_inter_deck)),
+         second = .data$overall - as.numeric(colMeans(starter_turns_inter_deck))) %>% 
+  gather("turn", "strength", .data$overall, .data$first, .data$second, factor_key = TRUE) %>% 
+  mutate(turn = factor(.data$turn, levels = c("first", "overall", "second")))
+
+ggplot(means_split_starter, aes(starter, strength, pch = turn, colour = turn)) + 
+  geom_point() + 
+  coord_flip() + 
+  ggtitle("starter mean strength levels by turn order", "Partial pooling and interactions on starters and specs")
+```
+
+```{r, "extract inter spec strengths"}
+get_by_mean_value(specs_inter_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength", "Partial pooling and interactions on starters and specs") + 
+  xlab("spec") + 
+  ylab("strength")
+plot_rank(specs_inter_deck, "spec strength", "Partial pooling and interactions on starters and specs")
+
+get_by_mean_value(specs_inter_deck + spec_turns_inter_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength as first spec", "Partial pooling and interactions on starters and specs") + 
+  xlab("spec") + 
+  ylab("strength")
+plot_rank(specs_inter_deck + spec_turns_inter_deck, "first spec strength",
+          "Partial pooling and interactions on starters and specs")
+
+get_by_mean_value(specs_inter_deck - spec_turns_inter_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean skill as second spec", "Partial pooling and interactions on starters and specs") + 
+  xlab("spec") + 
+  ylab("skill")
+plot_rank(specs_inter_deck - spec_turns_inter_deck, "second spec strength",
+          "Partial pooling and interactions on starters and specs")
+
+get_by_mean_value(spec_turns_inter_deck, sort_fn = function(x) sort(abs(x))) %>% 
+  plot_flipped_effects_violin("Ordered by absolute mean turn effect on strength", "Partial pooling and interactions on starters and specs") + 
+  xlab("spec") + 
+  ylab("turn-order strength effect")
+```
+
+```{r, "plot inter spec strengths"}
+means_split_spec <- colMeans(specs_inter_deck) %>% 
+  enframe(name = NULL) %>% 
+  rename(overall = .data$value) %>% 
+  mutate(spec = factor(specs, levels = specs[order(.data$overall)]),
+         first = .data$overall + as.numeric(colMeans(spec_turns_inter_deck)),
+         second = .data$overall - as.numeric(colMeans(spec_turns_inter_deck))) %>% 
+  gather("turn", "strength", .data$overall, .data$first, .data$second, factor_key = TRUE) %>% 
+  mutate(turn = factor(.data$turn, levels = c("first", "overall", "second")))
+
+ggplot(means_split_spec, aes(spec, .data$strength, pch = .data$turn, colour = .data$turn)) + 
+  geom_point() + 
+  coord_flip() + 
+  ggtitle("spec mean strength levels by turn order", "Partial pooling and interactions on starters and specs")
+```
+
+```{r, "extract/plot inter starter/spec strengths"}
+sort(colMeans(starter_specs_inter_deck))
+get_by_mean_value(starter_specs_inter_deck) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength", "Partial pooling and interactions on starters and specs") + 
+  xlab("spec") + 
+  ylab("strength")
+plot_rank(starter_specs_inter_deck, "starter/spec interaction strength",
+          "Partial pooling and interactions on starters and specs")
+get_by_mean_value(starter_specs_inter_deck) %>% 
+  separate("effect", c("starter", "spec"), "/") %>% 
+  mutate(starter = factor(.data$starter, sort(unique(.data$starter), decreasing = TRUE))) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength", "Partial pooling and interactions on starters and specs", .data$starter) +
+  xlab("spec") +
+  ylab("strength") +
+  facet_wrap(. ~ .data$spec)
+get_by_mean_value(starter_specs_inter_deck) %>% 
+  separate("effect", c("starter", "spec"), "/") %>% 
+  filter(.data$starter == codexdata::starters$starter[match(.data$spec, codexdata::starters$spec)]) %>% 
+  mutate(starter = factor(.data$starter, sort(unique(.data$starter), decreasing = TRUE))) %>% 
+  plot_flipped_effects_violin("Ordered by mean strength", "Partial pooling and interactions on starters and specs", .data$spec) +
+  xlab("spec") +
+  ylab("strength") +
+  facet_wrap(. ~ .data$starter, scales = "free_y")
+```
+
+```{r, "get monocolour deck names and components"}
+mononames <- paste0("Mono", setdiff(starters, "Neutral"))
+monobits <- components(mononames, codexdata::starters, codexdata::nicknames)
+```
+
+```{r, "get monocolour strengths for inter_deck"}
+P1_monostrengths <- tibble(empty = numeric(nrow(starters_inter_deck)))
+P2_monostrengths <- tibble(empty = numeric(nrow(starters_inter_deck)))
+for (i in seq_along(mononames)) {
+  nm <- mononames[i]
+  st <- monobits[i, starter, drop = TRUE]
+  sps <- unlist(monobits[i, c("spec1", "spec2", "spec3")])
+  P1_monostrength <- starters_inter_deck[, st, drop = TRUE] +
+    starter_turns_inter_deck[, st, drop = TRUE] +
+    rowSums(specs_inter_deck[, sps]) +
+    rowSums(spec_turns_inter_deck[, sps]) +
+    rowSums(starter_specs_inter_deck[, c(paste0(st, "/", sps))])
+  P1_monostrengths <- mutate(P1_monostrengths, !!nm := P1_monostrength)
+  P2_monostrength <- starters_inter_deck[, st, drop = TRUE] -
+    starter_turns_inter_deck[, st, drop = TRUE] +
+    rowSums(specs_inter_deck[, sps]) -
+    rowSums(spec_turns_inter_deck[, sps]) +
+    rowSums(starter_specs_inter_deck[, c(paste0(st, "/", sps))])
+  P2_monostrengths <- mutate(P2_monostrengths, !!nm := P2_monostrength)
+}
+P1_monostrengths <- P1_monostrengths[, -1]
+P2_monostrengths <- P2_monostrengths[, -1]
+```
+
+```{r, "plot monocolour strengths for inter_deck"}
+get_by_mean_value(P1_monostrengths) %>% 
+  plot_flipped_effects_violin("Sorted by P1 deck strength", "Partial pooling and interactions on starters and specs")
+get_by_mean_value(P2_monostrengths) %>% 
+  plot_flipped_effects_violin("Sorted by P2 deck strength", "Partial pooling and interactions on starters and specs")
+plot_rank(P1_monostrengths, "monocolour P1 deck strength", "Partial pooling and interactions on starters and specs")
+plot_rank(P2_monostrengths, "monocolour P2 deck strength", "Partial pooling and interactions on starters and specs")
+```
+
+```{r, "combine deck components strengths for full inter-deck model"}
+extract_full_inter_model_matrix <- function(sim) {
+  arr <- array(dim = c(St + Sp + 1L, St + Sp + 1L, nrow(sim$starter))) # + 1L for turn effect
+  for (i in 1:dim(arr)[3]) {
+    diag(arr[, , i]) <- c(sim$starter[i,, drop = TRUE], sim$spec[i, , drop = TRUE], sim$turn[i])
+    arr[1:St, St + 1:Sp, i] <- sim$starter_spec[i, , ]
+    arr[1:St, St + Sp + 1, i] <- sim$starter_turn[i, ]
+    for (j in seq_along(specs)) {
+      for (k in setdiff(seq_along(specs), 1:j)) {
+        arr[St + j, St + k, i] <- sim$spec_spec[i, paste(specs[j], specs[k], sep = "/")]
+      }
+    }
+    arr[St + 1:Sp, St + Sp + 1, i] <- sim$spec_turn[i, ]
+  }
+  dimnames(arr) <- list(c(starters, specs, "Turn"), c(starters, specs, "Turn"), NULL)
+  arr
+}
+full_inter_array <- extract_full_inter_model_matrix(sims$`Partial pooling: (starters+specs)^2`)
+```
+
+```{r, "make deck component strength mean table for full inter-deck model"}
+full_inter_component_table <- melt(as.data.table(apply(full_inter_array, 1:2, mean), 
+                                                 keep.rownames = "Component 1"),
+                                   id.vars = "Component 1", 
+                                   variable.name = "Component 2", 
+                                   value.name = "Effect")[!is.na(Effect),
+                                                          .(`Component 1` = factor(`Component 1`,
+                                                                                   c(starters, specs, "Turn")), 
+                                                            `Component 2` = factor(`Component 2`,
+                                                                                   c(starters, specs, "Turn")), 
+                                                            Effect)]
+```
+
+# Versus models
+
+In retrospect, a deck's strength will be heavily dependent on the opposing deck, so ranking deck strengths on a single scale is silly. So we now use models that evaluate deck parts only with respect to an opposing part.
+
+```{r, "extract versus model sims"}
+vs_results <- results[str_detect(names(results), "Versus")]
+vs_sims <- sims[str_detect(names(sims), "Versus")]
+```
+
+## Player skill
+
+```{r, "extract vs split models player skills"}
+vs_sim_skills <- stats::setNames(Map("[[", vs_sims, "player"),
+                                 c("forum data", "forum + Metalize tournament data", 
+                                   "forum + Metalize data", "forum data, negative skill", 
+                                   "forum data, Gamma priors"))
+vs_sim_skills <- Map(function(x, y) melt(as.data.table(set_colnames(x, y)),
+                                         variable.name = "player",
+                                         value.name = "player skill",
+                                         measure.vars = y)[,
+                                                           .(`player skill`,
+                                                             mean = mean(`player skill`)), 
+                                                           by = "player"],
+                     vs_sim_skills,
+                     list(players, metal_players, full_metal_players, players, players))
+vs_split_player_levels <- vs_sim_skills$`forum data`[order(mean), unique(player)]
+
+vs_skill <- rbindlist(vs_sim_skills,
+                      idcol = "model data")[, .(`model data` = factor(`model data`, 
+                                                                      names(vs_sim_skills)),
+                                                player, 
+                                                `player skill`, mean, 
+                                                model = "Versus model")]
+vs_skill_by_forum_skill <- vs_skill[, .(`model data`, player = factor(player, vs_split_player_levels),
+                                        `player skill`, mean, model)]
+```
+
+```{r, "plot vs models player skills", fig.height=15}
+plot_player_skill(vs_skill_by_forum_skill[is.element(player, players)], "overall") +
+  facet_wrap(. ~ `model data`, ncol = 2) +
+  ylim(-5, 5)
+```
+
+This is getting rather crowded! Here's a version with only players that have been active in 2019 or 2020.
+
+```{r, "plot vs models player skills for active players", fig.height=15}
+active_players <- as.data.table(normal_matches)[year(end) >= 2019, sort(unique(c(player1, player2)))]
+plot_player_skill(vs_skill_by_forum_skill[is.element(player, active_players)], "overall") +
+  facet_wrap(. ~ `model data`, ncol = 2) +
+  ylim(-5, 5)
+```
+
+```{r, "plot vs model negative player skill for active players"}
+plot_player_skill(vs_skill_by_forum_skill[is.element(player, active_players) & 
+                                            `model data` == "forum data, negative skill"], 
+                  "overall") +
+  ylim(-10, 0)
+```
+
+```{r, "plot vs model player skill for Metalize data"}
+metal_player_levels <- vs_sim_skills$`forum + Metalize data`[!is.element(player, players) |
+                                                             player == "bolyarich"
+                                                             ][order(mean), unique(player)]
+plot_player_skill(vs_skill[str_detect(`model data`, "Metalize")][!is.element(player, players) |
+                                                                   player == "bolyarich",
+                                                                 .(`model data`,
+                                                                   player = factor(player, metal_player_levels),
+                                                                   `player skill`, mean,
+                                                                   model = "Versus model")],
+                  "overall") +
+  facet_grid(. ~ `model data`) +
+  ylim(c(-5, 5))
+```
+
+## Monocolour matchups
+
+```{r, "extract vs split model monocolour matchups"}
+vs_mono_arrays <- Map(get_matchup_array, vs_results, MoreArgs = list(deck_names = mononames))
+vs_monos <- Map(get_matchups_from_array, vs_mono_arrays)
+vs_mono_bind <- rbindlist(vs_monos, idcol = "model")
+```
+
+```{r, make vs model monocolour matchup plots}
+vs_monocolour_plots <- Map(plot_matchup_samples, vs_monos)
+```
+
+```{r, plot model monocolour matchups}
+ggplot(vs_mono_bind[, .(model = factor(str_remove(model, "Versus model(, | with )"),
+                                       rev(str_remove(str_subset(model_names, "Versus model"),
+                                                      "Versus model(, | with )"))),
+                        P1, P2, prob_matchup, prob_mean)], 
+       aes(x = .data$model, y = .data$prob_matchup, fill = .data$prob_mean)) +
+  geom_violin(draw_quantiles = c(1/4, 1/2, 3/4)) +
+  coord_flip() +
+  xlab(NULL) +
+  ylab("matchup") +
+  scale_y_continuous(breaks = seq.int(0, 10)/10, labels = seq.int(0, 10)) +
+  facet_grid(P1 ~ P2) +
+  scale_fill_viridis_c(option = "B", guide = FALSE)
+```
+
+```{r, plot model monocolour matchups with forum model and forum + Metal tournament model only}
+ggplot(vs_mono_bind[, .(model = factor(str_remove(model, "Versus model(, | with )"),
+                                       rev(str_remove(str_subset(model_names, "Versus model"),
+                                                      "Versus model(, | with )"))),
+                        P1, P2, prob_matchup, prob_mean)
+                    ][model == "forum data" | model == "forum + Metalize tournament data"], 
+       aes(x = .data$model, y = .data$prob_matchup, fill = .data$prob_mean)) +
+  geom_violin(draw_quantiles = c(1/4, 1/2, 3/4)) +
+  coord_flip() +
+  xlab(NULL) +
+  ylab("matchup") +
+  scale_y_continuous(breaks = seq.int(0, 10)/10, labels = seq.int(0, 10)) +
+  facet_grid(P1 ~ P2) +
+  scale_fill_viridis_c(option = "B", guide = FALSE)
+```
+
+```{r, "plot vs split model monocolour matchups"}
+vs_monocolour_plots[[1]]
+```
+
+```{r, "print vs model monocolour matchups in order"}
+vs_monos_print <- vs_mono_bind[, .(`P1 win probability` = prob_matchup[1]), 
+                               by = c("model", "P1", "P2")
+                               ][, .(model = factor(model, unique(model)),
+                                     P1, P2, `P1 win probability`,
+                                     matchup = paste(format(round(`P1 win probability`, 2)*10, nsmall = 1),
+                                                     format(10 - round(`P1 win probability`, 2)*10, nsmall = 1),
+                                                     sep = "-"),
+                                     fairness = 1 - 2*abs(`P1 win probability` - 1/2))]
+formatRound(datatable(vs_monos_print, rownames = FALSE, filter = "top"), c(4, 6), c(3, 2))
+```
+
+## Model variances
+
+```{r, "plot versus model variances"}
+plot_variances(rbindlist(Map(get_variances, vs_sims, source = rep(c("sd", "var"), c(4, 1))), 
+                         idcol = "model")[, .(model = factor(model, unique(model)),
+                                              type, value)]) +
+  facet_wrap(. ~ .data$model)
+```
+
+# Useful tables
+
+## Full inter model
+
+```{r, "extract printable full inter info"}
+full_inter_turn_effect_table <- full_inter_component_table[`Component 1` != "Turn" &
+                                                             `Component 2` == "Turn",
+                                                           .(`Component 1` = factor(`Component 1`, `Component 1`),
+                                                             `Component 2` = factor(`Component 1`, `Component 1`),
+                                                             Turn = Effect)]
+full_inter_base_turn <- full_inter_component_table[`Component 1` == "Turn" & `Component 2` == "Turn", Effect]
+full_inter_split_table <- full_inter_turn_effect_table[full_inter_component_table[`Component 2` != "Turn"], 
+                                                       on = paste("Component", 1:2)
+                                                       ][order(`Component 1`, `Component 2`), 
+                                                         .(`Component 1`, `Component 2`, Effect,
+                                                           Turn = ifelse(is.na(Turn), 0, Turn))
+                                                         ][, .(`Component 1`, `Component 2`, Effect, Turn,
+                                                               P1 = Effect + Turn, 
+                                                               P2 = Effect - Turn)]
+```
+
+The full inter model has a base turn effect, independent of deck, which is equal to `r full_inter_base_turn`. This is added to the log odds of a P1 victory. I've therefore presented the following columns:
+
+- Component is the name of a starter or spec.
+- Interactee is also the name of a starter or spec. Note that only components after Component are given, in the following order: starters, then specs, with alphabetical order within those groups.
+- Base log-odds effect of Component-Interactee pair. If the two are equal, this is the base effect of the single component given. If they are different, this is the interaction effect.
+- Turn is the Component-Turn interaction effect. Since interactions are only two-way, this is zero if Interactee is different to Component. This is added or subtracted from the log-odds of victory for P1 and P2, respectively.
+- P1 is Base + Turn. The total at the bottom of the column also adds the base turn effect.
+- P2 is Base - Turn. The total at the bottom of the column also subtracts the base turn effect.
+
+To get the appropriate values for a given deck, puts its four components in the filters for both Component and Interactee.
+
+```{r, "simple full inter table"}
+full_inter_sketch <- htmltools::withTags(table(class = "display",
+                                               thead(tr(th(colspan = 2, "Deck components"),
+                                                        th(colspan = 4, "Log-odds effect")),
+                                                     tr(lapply(c("Component", "Interactee",
+                                                                 "Base", "Turn", "P1", "P2"),
+                                                               th))),
+                                               tfoot(tr(th("Component"), th("Interactee"), 
+                                                        th(0), th(0), th(0), th(0)))))
+full_inter_JS_code <- "function(row, data, start, end, display) {
+  var api = this.api(), data;
+  total_mean = api.column(2, {search: 'applied'}).data().reduce( function(a, b) { return a + b}, 0);
+  $( api.column(2).footer() ).html('Total: ' + total_mean.toFixed(2) + '; Win prob: ' + (100/(1+Math.exp(-total_mean))).toFixed(1) + '%');
+  total_mean2 = api.column(3, {search: 'applied'}).data().reduce( function(a, b) { return a + b}, 0);
+  $( api.column(3).footer() ).html('Total: ' + total_mean2.toFixed(2));
+  total_mean3 = api.column(4, {search: 'applied'}).data().reduce( function(a, b) { return a + b}, 0);
+  $( api.column(4).footer() ).html('Total + base turn effect: ' + total_mean3.toFixed(2) + '; Win prob: ' + (100/(1+Math.exp(-total_mean3))).toFixed(1) + '%');
+  total_mean4 = api.column(5, {search: 'applied'}).data().reduce( function(a, b) { return a + b}, 0);
+  $( api.column(5).footer() ).html('Total + base turn effect: ' + total_mean4.toFixed(2) + '; Win prob: ' + (100/(1+Math.exp(-total_mean4))).toFixed(1) + '%');
+  }"
+datatable(full_inter_split_table, rownames = FALSE, filter = "top", container = full_inter_sketch, 
+          options = list(footerCallback = JS(full_inter_JS_code))) %>% 
+  formatRound(3:6, digits = 3)
+```
+
+## Versus model
+
+```{r, "extract vs model matrices"}
+vs_arrays <- Map("[[", vs_results, "vs_array")
+```
+
+```{r, "simple versus table"}
+vs_split_table <- as.data.table(vs_arrays[[1]])[, .(sample = V1, 
+                                                    `P1 component` = factor(V2, c(starters, specs)),
+                                                    `P2 component` = factor(V3, c(starters, specs)),
+                                                    value)
+                                                ][, .(mean = mean(value)),
+                                                  by = c("P1 component", "P2 component")
+                                                  ][order(`P1 component`, `P2 component`)]
+vs_sketch <- htmltools::withTags(table(class = "display",
+                                       thead(tr(th(colspan = 2, "Deck components"),
+                                                th(rowspan = 2, "Mean Player 1 win log-odds effect")),
+                                             tr(lapply(c("Player 1", "Player 2"), th))),
+                                       tfoot(tr(th("Player 1"), th("Player 2"), th(0)))))
+vs_split_JS_code <- "function(row, data, start, end, display) {
+  var api = this.api(), data;
+  total_mean = api.column(2, {search: 'applied'}).data().reduce( function(a, b) { return a + b}, 0);
+  $( api.column(2).footer() ).html('Total: ' + total_mean.toFixed(2) + '; P1 win prob: ' + (100/(1+Math.exp(-total_mean))).toFixed(1) + '%')
+  }"
+datatable(vs_split_table, rownames = FALSE, filter = "top", container = vs_sketch, 
+          options = list(footerCallback = JS(vs_split_JS_code))) %>% 
+  formatRound(3, digits = 3)
+```
+
+Using Gamma priors:
+
+```{r, "simple versus table with Gamma priors"}
+gamma_vs_split_table <- as.data.table(vs_arrays[[5]])[, .(sample = V1, 
+                                                    `P1 component` = factor(V2, c(starters, specs)),
+                                                    `P2 component` = factor(V3, c(starters, specs)),
+                                                    value)
+                                                ][, .(mean = mean(value)),
+                                                  by = c("P1 component", "P2 component")
+                                                  ][order(`P1 component`, `P2 component`)]
+datatable(gamma_vs_split_table, rownames = FALSE, filter = "top", container = vs_sketch, 
+          options = list(footerCallback = JS(vs_split_JS_code))) %>% 
+  formatRound(3, digits = 3)
+```
+
+## Nash equilibria
+
+Here are the player equilibrium strategies for the versus model:
+
+### Monocolour
+
+Nash equilibrium for mean matchups:
+
+```{r, "versus model equilibrium"}
+mono_matrix <- as.matrix(dcast(unique(vs_monos[[1]][, c("P1", "P2", "prob_mean")]), 
+                               P1 ~ P2, value.var = "prob_mean"), 
+                         rownames = "P1")
+get_nash_equilibria(mono_matrix)
+```
+
+Using Gamma priors:
+
+```{r, "versus model equilibrium with Gamma prior"}
+gamma_mono_matrix <- as.matrix(dcast(unique(vs_monos[[5]][, c("P1", "P2", "prob_mean")]), 
+                               P1 ~ P2, value.var = "prob_mean"), 
+                         rownames = "P1")
+get_nash_equilibria(gamma_mono_matrix)
+```
+
+Mean Nash equilibrium, i.e. mean of Nash equilibria taken over each sample:
+
+```{r, "probabilistic versus model equilibrium"}
+mono_stoch_nash <- get_nash_equilibria(vs_mono_arrays[[1]])
+mono_mean_nash <- apply(mono_stoch_nash, 1:2, mean)
+as.data.table(mono_mean_nash, keep.rownames = "Player")
+```
+
+Using Gamma priors
+
+```{r, "probabilistic versus model equilibrium with Gamma prior"}
+gamma_mono_stoch_nash <- get_nash_equilibria(vs_mono_arrays[[5]])
+gamma_mono_mean_nash <- apply(gamma_mono_stoch_nash, 1:2, mean)
+as.data.table(gamma_mono_mean_nash, keep.rownames = "Player")
+```
+
+### Multicolour
+
+Here are the non-zero-weighted picks in the calibrated Nash, using the lognormal prior:
+
+```{r, "Multicolour Nash mean for lognormal priors"}
+multicolour_calibrated_nash <- readRDS("results/multicolour_nash_vs_split.rds")
+print_nash(multicolour_calibrated_nash)
+DT_nash(multicolour_calibrated_nash, 4L)
+```
+
+```{r, "Multicolour Nash mean counts for non-zero weights"}
+tidy_multicolour_calibrated_nash <- reformat_used_nash(multicolour_calibrated_nash)
+melt(tidy_multicolour_calibrated_nash[, lapply(.SD, function(x) sum(x == 0)),
+                                                     .SDcols = c("P1", "P2", "Both")],
+     id.vars = character(0), variable.name = "Player", value.name = "# with zero weight")
+```
+
+Most of the decks have non-zero weight, so we again have high uncertainty. Here are the monocolour decks, and some other notable ones:
+
+```{r, "Notable decks in multicolour Nash mean"}
+knitr::kable(tidy_multicolour_calibrated_nash[is.element(Deck,
+                                                         c(mononames,
+                                                           "Nightmare", "Miracle Grow",
+                                                           "[Discipline/Strength]/Finesse",
+                                                           "[Past]/Anarchy/Peace",
+                                                           "[Demonology]/Anarchy/Balance"))],
+             digits = 4L, format.args = list(scientific = FALSE))
+```
+
+How much weight does each component get?
+
+```{r, "Nash weight per component"}
+multinash_comps <- melt(tidy_multicolour_calibrated_nash[,
+                                                         c(components(Deck,
+                                                                                            codexdata::starters,
+                                                                                            nicknames),
+                                                           .(P1 = P1, P2 = P2, Both = Both))],
+                        id.vars = c("P1", "P2", "Both"),
+                        variable.name = "Component", value.name = "Name"
+)[,
+  lapply(.SD, sum), .SDcols = c("P1", "P2", "Both"), by = Name]
+knitr::kable(multinash_comps[is.element(Name, codexdata::starters$starter),
+                             .(Starter = Name, P1, P2, Both)
+                             ][order(-Both)], digits = 3L)
+knitr::kable(multinash_comps[!is.element(Name, codexdata::starters$starter),
+                             .(Spec = Name, P1, P2, Both)
+                             ][order(-Both)], digits = 3L)
+```
+
+## Counters
+
+We could also suppose that we want the best counter to a known opposing deck, with unknown turn order. In this case, we're fine to use all possible multicolour decks. Using the lognormal prior, we'd get the following top counter-picks:
+
+```{r, "multicolour counter-picks for lognormal prior"}
+counters <- readRDS("results/multicolour_counters.rds")
+datatable(counters[, .SD[`Probability best counter` == max(`Probability best counter`)],
+                   by = "Opponent"
+                   ][order(-`Probability best counter`)],
+          filter = "top", rownames = FALSE)
+```
+
+Here are each deck's counter with highest win probability:
+
+```{r, "multicolour highest-probability counter-picks for lognormal prior"}
+datatable(counters[, .SD[`Counter win probability` == max(`Counter win probability`)],
+                   by = "Opponent"
+                   ][order(-`Counter win probability`)],
+          filter = "top", rownames = FALSE)
+```
+
+Here are the top counter-picks for Nightmare:
+
+```{r, "deck countering example"}
+knitr::kable(head(counter("Nightmare", vs_arrays[[1]])),
+             digits = c(NA, nchar(1/dim(vs_arrays[[1]])[1]) - 2L, 3))
+```
+
+And here are counter-picks for Miracle Grow, [Discipline/Strength]/Finesse, and Demonology/Anarchy/Balance:
+
+```{r, "other counters"}
+knitr::kable(head(counter("Miracle Grow", vs_arrays[[1]])),
+             digits = c(NA, nchar(1/dim(vs_arrays[[1]])[1]) - 2L, 3))
+knitr::kable(head(counter("[Discipline/Strength]/Finesse", vs_arrays[[1]])),
+             digits = c(NA, nchar(1/dim(vs_arrays[[1]])[1]) - 2L, 3))
+knitr::kable(head(counter("[Demonology/Anarchy/Balance", vs_arrays[[1]])),
+             digits = c(NA, nchar(1/dim(vs_arrays[[1]])[1]) - 2L, 3))
+```
+
+```{r, "best Nash deck"}
+best <- tidy_multicolour_calibrated_nash[1, Deck]
+```
+
+Here are the counters for `r best`, the deck with highest weight in the Nash mean:
+
+```{r, "best's counter"}
+knitr::kable(head(counter(best, vs_arrays[[1]])),
+             digits = c(NA, nchar(1/dim(vs_arrays[[1]])[1]) - 2L, 3))
+```
+
+```{r, "hardest deck to counter"}
+hardest <- counters[, .SD[`Probability best counter` == max(`Probability best counter`)
+                          ][`Counter win probability` == max(`Counter win probability`)],
+                    by = "Opponent"
+                    ][`Counter win probability` == min(`Counter win probability`)]
+```
+
+Here are the counters for `r hardest$Opponent`, the deck whose most-likely-best counter has the lowest win probability (`r format(hardest[["Counter win probability"]], digits = 3L)`):
+
+```{r, "counters for hardest to counter"}
+knitr::kable(head(counter(as.character(hardest$Opponent), vs_arrays[[1]])),
+             digits = c(NA, nchar(1/dim(vs_arrays[[1]])[1]) - 2L, 3))
+```
+
+```{r, "prob-hardest deck to counter"}
+prob_hardest <- counters[, .SD[`Counter win probability` == max(`Counter win probability`)],
+                         by = "Opponent"
+                         ][`Counter win probability` == min(`Counter win probability`)]
+```
+
+Here are the counters for `r prob_hardest$Opponent`, the deck whose highest-win-probability counter has the lowest win probability (`r format(prob_hardest[["Counter win probability"]], digits = 3L)`):
+
+```{r, "counters for prob-hardest to counter"}
+knitr::kable(head(counter(as.character(prob_hardest$Opponent), vs_arrays[[1]])),
+             digits = c(NA, nchar(1/dim(vs_arrays[[1]])[1]) - 2L, 3))
+knitr::kable(head(counter(as.character(prob_hardest$Opponent), vs_arrays[[1]])[order(-`Counter win probability`)]),
+             digits = c(NA, nchar(1/dim(vs_arrays[[1]])[1]) - 2L, 3))
+```
+
+Finally, here's the full counter table for the monocolour decks:
+
+```{r, "counters for monocolour decks"}
+monocounters <- rbindlist(lapply(setNames(mononames, mononames), counter, vs_arrays[[1]], "mono"),
+                          idcol = "Opponent")
+formatRound(datatable(monocounters, filter = "top", rownames = FALSE), 3:4, 3L)
+```
+
+Black is the most-likely-best counter to everyone, except for Red (White) and White (Purple).
