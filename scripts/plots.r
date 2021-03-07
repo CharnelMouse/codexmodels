@@ -50,18 +50,19 @@ starter_picks <- picks[
 # means taken with each tournament having equal weight, not weighted by number of entrants
 mean_starter_counts <- starter_picks[
   , .(starter, count = count/sum(count)), by = "tournament"
-][, .(count = mean(count)), by = "starter"
+][!is.nan(count), .(count = mean(count)), by = "starter"
 ][order(-count)
 ][, .(starter = factor(starter, starter), count)]
 spec_picks <- picks[
-  , .(tournament, spec = c(spec1, spec2, spec3))][, .(count = .N), by = c("tournament", "spec")
-  ][CJ(tournament, spec, unique = TRUE),
-    on = c("tournament", "spec")
-  ][, count := ifelse(is.na(count), 0, count)
-  ][!endsWith(spec, "F20")]
+  , .(tournament, spec = c(spec1, spec2, spec3))
+][, .(count = .N), by = c("tournament", "spec")
+][CJ(tournament, spec, unique = TRUE),
+  on = c("tournament", "spec")
+][, count := ifelse(is.na(count), 0, count)
+][!endsWith(spec, "F20")]
 mean_spec_counts <- spec_picks[
   , .(spec, count = count/sum(count)), by = "tournament"
-][, .(count = mean(count)), by = "spec"
+][!is.nan(count), .(count = mean(count)), by = "spec"
 ][order(-count)
 ][, .(spec = factor(spec, spec), count)]
 starter_colours <- setNames(
@@ -118,7 +119,7 @@ start_line <- ggplot(
       count = count/sum(count)
     ),
     by = "tournament"
-  ]),
+  ])[!is.nan(count)],
   aes(
     x = factor(tournament, starts$tournament),
     y = count,
@@ -146,8 +147,11 @@ spec_fill <- ggplot(
   xlab("tournament") +
   ylab("proportion")
 spec_line <- ggplot(
-  spec_picks[, .(spec = factor(spec, levels = levels(mean_spec_counts$spec)),
-                 count = count / sum(count)), by = "tournament"],
+  spec_picks[
+    ,
+    .(spec = factor(spec, levels = levels(mean_spec_counts$spec)),
+      count = count / sum(count)), by = "tournament"
+  ][!is.nan(count)],
   aes(
     x = factor(tournament, starts$tournament),
     y = count,
