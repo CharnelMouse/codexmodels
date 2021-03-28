@@ -6,6 +6,9 @@ library(parallel)
 n.cores <- detectCores()
 current_results <- readRDS("results/tidy_vs_split.rds")
 
+multicolour_mean_matchups <- get_mean_matchup_array_from_sim(current_results, "multi") # Slow!
+saveRDS(multicolour_mean_matchups, "results/multicolour_mean_matchup_vs_split.rds")
+
 # expensive
 multicolour_nash_array <- get_nash_array_from_sim(current_results, "multi", parallel = n.cores)
 saveRDS(multicolour_nash_array, "results/multicolour_nash_array_vs_split.rds")
