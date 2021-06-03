@@ -5,3 +5,4 @@
 *.html
 results/
 models/*.rds
+models/*.exe

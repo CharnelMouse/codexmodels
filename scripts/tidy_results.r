@@ -2,16 +2,32 @@ library(codex)
 source("scripts/configure_rstan.r")
 source("scripts/load_data.r")
 
+n_eff <- function(results) {
+  UseMethod("n_eff", results)
+}
+
+n_eff.stanfit <- function(x) {
+  as.data.table(
+    rstan::summary(x)$summary,
+    keep.rownames = "parameter"
+  )[parameter != "lp_",
+    c("parameter", "n_eff")]
+}
+
+n_eff.CmdStanMCMC <- function(x) {
+  as.data.table(
+    x$summary(n_eff = posterior::ess_basic)
+  )[variable != "lp_",
+    .(parameter = variable, n_eff)
+  ]
+}
+
 tidy_save <- function(name, data, matches, vs_array, n_eff, log_lik) {
   x <- readRDS(paste0("results/", name, ".rds"))
   tidy <- get_tidy_model_results(x, data, matches, vs_array, log_lik)
   saveRDS(tidy, paste0("results/tidy_", name, ".rds"))
   if (n_eff) {
-    neff_info <- as.data.table(
-      rstan::summary(x)$summary,
-      keep.rownames = "parameter"
-    )[parameter != "lp_",
-      c("parameter", "n_eff")]
+    neff_info <- n_eff(x)
     fwrite(neff_info, paste0("results/", name, "_n_eff.csv"))
   }
   unlink(paste0("results/", name, ".rds"))

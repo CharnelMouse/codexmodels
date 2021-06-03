@@ -1,7 +1,7 @@
 library(data.table)
 library(codexdata)
 library(codex)
-current <- "CAWS20"
+current <- "XCAPS21"
 seed_number <- 2018 - 11 - 10
 
 is_standard_match <- function(victor, victory, map, deck1, deck2) {
