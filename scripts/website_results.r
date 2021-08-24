@@ -1,3 +1,9 @@
+current <- "XCAPS21"
+library(data.table)
+
+current_matches <- codexdata::matches[tournament == current]
+fwrite(current_matches, "results/website_current_matches.csv")
+
 tidy_current_vs_split <- readRDS("results/tidy_current_vs_split.rds")
 
 website_current_vs_split <- tidy_current_vs_split[c("tidy_results", "vs_array")]
