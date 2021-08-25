@@ -1,4 +1,4 @@
-current <- "XCAPS21"
+current <- "CAMS21"
 library(data.table)
 
 current_matches <- codexdata::matches[tournament == current]
