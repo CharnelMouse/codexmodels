@@ -1,4 +1,4 @@
-current <- "CAMS21"
+current <- "XCAFRR21"
 library(data.table)
 
 current_matches <- codexdata::matches[tournament == current]
@@ -8,7 +8,13 @@ tidy_current_vs_split <- readRDS("results/tidy_current_vs_split.rds")
 
 website_current_vs_split <- tidy_current_vs_split[c("tidy_results", "vs_array")]
 website_current_vs_split$tidy_results <-
-  website_current_vs_split$tidy_results[c("sd_player", "player")]
+  website_current_vs_split$tidy_results[c(
+    "sd_player",
+    "sd_starter_vs_starter",
+    "sd_starter_vs_spec",
+    "sd_spec_vs_spec",
+    "player"
+  )]
 
 saveRDS(website_current_vs_split, "results/website_current_vs_split.rds")
 
