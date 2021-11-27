@@ -47,8 +47,7 @@ Reduce(
     list("current_vs_split_metal"     , current_metal_mean_data     , current_metal_matches     , TRUE , FALSE, TRUE),
     list("vs_split_full_metal"        , full_metal_mean_data        , full_metal_matches        , TRUE , FALSE, TRUE),
     list("current_vs_split_full_metal", current_full_metal_mean_data, current_full_metal_matches, TRUE , FALSE, TRUE),
-    list("vs_split_negative"          , mean_data                   , normal_matches            , TRUE , FALSE, TRUE),
-    list("vs_split_gamma"             , mean_data                   , normal_matches            , TRUE , FALSE, TRUE)
+    list("vs_split_negative"          , mean_data                   , normal_matches            , TRUE , FALSE, TRUE)
   ),
   init = NULL
 )

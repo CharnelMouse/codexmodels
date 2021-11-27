@@ -152,40 +152,13 @@ vs_split_inputs <- c(
 #   "log_lik"
 # )
 
-vs_split_gamma_inputs <- c(
-  "M",
-  "P",
-  "St",
-  "Sp",
-  "first_player",
-  "second_player",
-  "first_starter",
-  "second_starter",
-  "first_specs1",
-  "first_specs2",
-  "first_specs3",
-  "second_specs1",
-  "second_specs2",
-  "second_specs3",
-  "w"
-)
-
-# vs_split_gamma_pars <- c(
-#   "matchup",
-#   "var_player", "var_starter_vs_starter", "var_starter_vs_spec", "var_spec_vs_spec",
-#   "player",
-#   "starter_vs_starter", "starter_vs_spec", "spec_vs_starter", "spec_vs_spec",
-#   "log_lik"
-# )
-
 model_names <- c(
   "simple_deck",
   "split_deck",
   "inter_deck",
   "full_inter_deck",
   "vs_split",
-  "vs_negative",
-  "vs_split_gamma"
+  "vs_negative"
 )
 
 models <- setNames(
@@ -230,8 +203,7 @@ Reduce(
     list("vs_split"       , current_metal_mean_data     , vs_split_inputs       , "current_vs_split_metal"     , FALSE, 12),
     list("vs_split"       , full_metal_mean_data        , vs_split_inputs       , "vs_split_full_metal"        , FALSE, 12),
     list("vs_split"       , current_full_metal_mean_data, vs_split_inputs       , "current_vs_split_full_metal", FALSE, 12),
-    list("vs_negative"    , mean_data                   , vs_split_inputs       , "vs_split_negative"          , FALSE, 12),
-    list("vs_split_gamma" , mean_data                   , vs_split_gamma_inputs , "vs_split_gamma"             , FALSE, 12)
+    list("vs_negative"    , mean_data                   , vs_split_inputs       , "vs_split_negative"          , FALSE, 12)
   ),
   init = NULL
 )

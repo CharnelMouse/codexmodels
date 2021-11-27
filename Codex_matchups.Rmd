@@ -52,8 +52,7 @@ model_names <- c("Partial pooling: decks",
                  "Versus model, negative skill, forum data",
                  "Versus model, Gamma priors, forum data")
 results_file_subnames <- c("simple_deck", "split_deck", "inter_deck", "full_inter_deck",
-                           "vs_split", "vs_split_metal", "vs_split_full_metal", "vs_split_negative",
-                           "vs_split_gamma")
+                           "vs_split", "vs_split_metal", "vs_split_full_metal", "vs_split_negative")
 results_file_names <- paste0("results/tidy_", results_file_subnames, ".rds")
 results <- stats::setNames(Map(readRDS, results_file_names), model_names)
 ```
